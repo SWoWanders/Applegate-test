@@ -1,0 +1,2864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Apple ][ Program</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#000;display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:20px;font-family:monospace;}
+#screen{background:#000;border:2px solid #1a4a1a;box-shadow:0 0 30px #33ff3333,inset 0 0 60px #000;position:relative;overflow:hidden;width:560px;}
+#terminal{width:560px;min-height:384px;padding:8px;font-family:"Courier New",monospace;font-size:16px;line-height:20px;color:#33ff33;text-shadow:0 0 6px #33ff33;white-space:pre-wrap;word-break:break-all;}
+#terminal.inverse{background:#33ff33;color:#000;}
+#terminal.flash{animation:flash .5s step-end infinite;}
+@keyframes flash{50%{opacity:.3;}}
+#gfxCanvas{position:absolute;top:0;left:0;display:none;z-index:1;image-rendering:pixelated;}
+#inputOverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:100;align-items:center;justify-content:center;flex-direction:column;gap:12px;}
+#inputOverlay.active{display:flex;}
+#inputPrompt{color:#33ff33;font-family:"Courier New",monospace;font-size:16px;}
+#inputField{background:#000;color:#33ff33;border:1px solid #33ff33;font-family:"Courier New",monospace;font-size:16px;padding:8px 12px;width:300px;outline:none;}
+#runBtn{margin-top:16px;font-family:"Courier New",monospace;font-size:14px;padding:10px 24px;background:transparent;border:1px solid #33ff33;color:#33ff33;cursor:pointer;letter-spacing:2px;}
+#runBtn:hover{background:rgba(51,255,51,.1);}
+#statusBar{color:#1a8a1a;font-family:monospace;font-size:12px;margin-top:10px;letter-spacing:2px;}
+</style>
+</head>
+<body>
+<div id="screen">
+  <canvas id="gfxCanvas"></canvas>
+  <div id="terminal"></div>
+</div>
+<button id="runBtn" onclick="startProgram()">&#9654; RUN PROGRAM</button>
+<div id="statusBar">APPLE ][ EMULATOR &middot; READY</div>
+<div id="inputOverlay">
+  <div id="inputPrompt"></div>
+  <input id="inputField" type="text" autocomplete="off" autocorrect="off" spellcheck="false"/>
+</div>
+<script>
+var _term=document.getElementById("terminal");
+var _canvas=document.getElementById("gfxCanvas");
+var _ctx2d=_canvas.getContext("2d");
+var _status=document.getElementById("statusBar");
+var _termText="",_grMode=null,_grLoColor=0,_grHiColor=3,_grCx=0,_grCy=0,_grScale=1,_grRot=0;
+var _LO_PAL=["#000000","#8C2020","#442098","#CC28B8","#006840","#808080","#229CF0","#88C0FF","#885000","#F07800","#808080","#FFA898","#10F010","#F0F018","#48D8C8","#FFFFFF"];
+var _HI_PAL=["#000000","#00FF00","#FF00FF","#FFFFFF","#000000","#FF6600","#0066FF","#FFFFFF"];
+var _SHAPE_DX=[0,1,1,1,0,-1,-1,-1], _SHAPE_DY=[-1,-1,0,1,1,1,0,-1];
+var _line=0,_ret=[],_onerr=null,_resumeNext=0,_trace=false,_running=false,_mem={};
+var _data=["HIT POINTS.....", "STRENGTH.......", "DEXTERITY......", "STAMINA........", "WISDOM.........", "GOLD...........", "SKELETON", "THIEF", "GIANT RAT", "ORC", "VIPER", "CARRION CRAWLER", "GREMLIN", "MIMIC", "DAEMON", "BALROG"];
+var _dp=0;
+var _kbLast=0, _kbQueue=[];
+document.addEventListener("keydown",function(e){
+  var c=e.key.length===1?e.key.charCodeAt(0):0;
+  if(c>0){_kbLast=c|0x80;_kbQueue.push(_kbLast);}
+});
+function _kbPeek(){
+  if(_kbQueue.length){_kbLast=_kbQueue[0];return _kbLast;}
+  return _kbLast;
+}
+function _kbClear(){_kbLast=0;_kbQueue=[];return 0;}
+var _audioCtx=null;
+function _speakerClick(){
+  try{
+    if(!_audioCtx)_audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+    var o=_audioCtx.createOscillator();
+    var g=_audioCtx.createGain();
+    o.connect(g);g.connect(_audioCtx.destination);
+    o.frequency.value=800;g.gain.value=0.1;
+    o.start();g.gain.exponentialRampToValueAtTime(0.001,_audioCtx.currentTime+0.02);
+    o.stop(_audioCtx.currentTime+0.02);
+  }catch(e){}
+}
+var _dosFiles={},_dosHandle=null,_dosMode="r",_dosReadLines=[],_dosReadPos=0;
+function _dosOpen(fname,mode){
+  _dosHandle=fname;_dosMode=mode;
+  if(mode==="r"){
+    var content=_dosFiles[fname]||localStorage.getItem("dos_"+fname)||"";
+    _dosReadLines=content.split("\n");_dosReadPos=0;
+  }else if(mode==="w"){_dosFiles[fname]="";_dosReadLines=[];_dosReadPos=0;}
+  else if(mode==="a"){_dosFiles[fname]=_dosFiles[fname]||localStorage.getItem("dos_"+fname)||"";}
+}
+function _dosClose(){
+  if(_dosHandle&&_dosMode!=="r"){localStorage.setItem("dos_"+_dosHandle,_dosFiles[_dosHandle]||"");}
+  _dosHandle=null;
+}
+function _dosSetRead(){_dosMode="r";}
+function _dosDelete(fname){delete _dosFiles[fname];localStorage.removeItem("dos_"+fname);}
+function _dosReadLine(){
+  if(_dosReadPos<_dosReadLines.length)return _dosReadLines[_dosReadPos++];
+  return "";
+}
+function _dosPrint(val){
+  if(_dosHandle&&_dosMode!=="r")_dosFiles[_dosHandle]+=String(val)+"\n";
+  else _print(String(val));
+}
+var _inkeyCached="";
+document.addEventListener("keypress",function(e){_inkeyCached=e.key.length===1?e.key:"";});
+function _renderTerm(){_term.textContent=_termText;_term.scrollTop=_term.scrollHeight;}
+function _print(s){_termText+=s+"\n";_renderTerm();}
+function _printNoNL(s){_termText+=s;_renderTerm();}
+function _printTab(s){_termText+=s+"\t";_renderTerm();}
+function _home(){_termText="";_renderTerm();}
+function _inverse(){_term.classList.add("inverse");}
+function _normal(){_term.classList.remove("inverse","flash");}
+function _flash(){_term.classList.add("flash");}
+function _vtab(n){var s="";for(var i=0;i<Math.max(0,n-1);i++)s+="\n";_termText+=s;_renderTerm();}
+function _htab(n){var s="";for(var i=0;i<Math.max(0,n-1);i++)s+=" ";_termText+=s;_renderTerm();}
+var _overlay=document.getElementById("inputOverlay");
+var _inPrompt=document.getElementById("inputPrompt");
+var _inField=document.getElementById("inputField");
+function _input(prompt){return new Promise(function(resolve){
+  _printNoNL(prompt);_inPrompt.textContent=prompt;_inField.value="";
+  _overlay.classList.add("active");_inField.focus();
+  function done(e){if(e.type==="keydown"&&e.key!=="Enter")return;
+    var val=_inField.value;_overlay.classList.remove("active");
+    _inField.removeEventListener("keydown",done);_termText+=val+"\n";_renderTerm();resolve(val);}
+  _inField.addEventListener("keydown",done);});}
+function _get(){return new Promise(function(resolve){
+  function onKey(e){document.removeEventListener("keydown",onKey);_inkeyCached="";resolve(e.key.length===1?e.key:"");}
+  document.addEventListener("keydown",onKey);});}
+function _gwInput(n){return new Promise(function(resolve){
+  if(n===1){
+    function onKey2(e){document.removeEventListener("keydown",onKey2);
+      _inkeyCached="";resolve(e.key.length===1?e.key:"");}
+    document.addEventListener("keydown",onKey2);
+  } else {
+    _input("INPUT$("+n+")").then(function(v){resolve(v.slice(0,n));});
+  }
+});}
+function _sgn(x){return x>0?1:(x<0?-1:0);}
+var _rndLast=0;
+function _rnd(x){if(x>0){_rndLast=Math.random();return _rndLast;}if(x===0)return _rndLast;_rndLast=Math.random();return _rndLast;}
+function _len(s){return String(s).length;}
+function _midS(s,st,n){s=String(s);var i=Math.trunc(st)-1;return n===undefined?s.slice(i):s.slice(i,i+Math.trunc(n));}
+function _leftS(s,n){return String(s).slice(0,Math.trunc(n));}
+function _rightS(s,n){var ss=String(s),nn=Math.trunc(n);return nn?ss.slice(-nn):"";}
+function _chrS(x){return String.fromCharCode(Math.trunc(x));}
+function _asc(s){return String(s).charCodeAt(0);}
+function _spc(n){var s="";for(var i=0;i<Math.max(0,Math.trunc(n));i++)s+=" ";return s;}
+function _tab(n){return _spc(n);}
+function _fre(x){return 35000;}
+function _usr(x){return 0;}
+function _peek(a){return _mem[Math.trunc(a)]||0;}
+function _poke(a,v){_mem[Math.trunc(a)]=Math.trunc(v)&0xFF;}
+function _scrn(x,y){return 0;}
+function _pdl(n){return 127;}
+function _callUsr(addr){
+  if(addr===-936||addr===62464){_home();_grText();return;}
+  if(addr===62450){_grText();return;}
+  if(addr===54915){_grInit("lo");return;}
+  if(addr===57350||addr===57352){_grInit("hi");return;}
+  if(addr===62454){_grInit("hi2");return;}
+  if(addr===-868||addr===64668){/* clear to EOL */return;}
+}
+function _end(){_running=false;_status.textContent="PROGRAM ENDED";}
+function _stop(line){_running=false;_print("\nBREAK IN "+line);_status.textContent="STOPPED AT LINE "+line;}
+function _grInit(mode){_grMode=mode;_canvas.style.display="block";_term.style.display="none";
+  var scr=document.getElementById("screen");
+  if(mode==="lo"){_canvas.width=480;_canvas.height=480;scr.style.width="480px";}
+  else{_canvas.width=560;_canvas.height=384;scr.style.width="560px";}
+  _ctx2d.fillStyle="#000";_ctx2d.fillRect(0,0,_canvas.width,_canvas.height);}
+function _grText(){_canvas.style.display="none";_term.style.display="block";}
+function _grColor(n){_grLoColor=n%16;}
+function _grHcolor(n){_grHiColor=n%8;}
+function _grPlot(x,y){_ctx2d.fillStyle=_LO_PAL[_grLoColor];_ctx2d.fillRect(x*12,y*12,12,12);}
+function _grVlin(y1,y2,x){_ctx2d.fillStyle=_LO_PAL[_grLoColor];
+  for(var y=Math.min(y1,y2);y<=Math.max(y1,y2);y++)_ctx2d.fillRect(x*12,y*12,12,12);}
+function _grHlin(x1,x2,y){_ctx2d.fillStyle=_LO_PAL[_grLoColor];
+  for(var x=Math.min(x1,x2);x<=Math.max(x1,x2);x++)_ctx2d.fillRect(x*12,y*12,12,12);}
+function _grHmove(x,y){_ctx2d.fillStyle=_HI_PAL[_grHiColor];_ctx2d.fillRect(x*2,y*2,2,2);_grCx=x;_grCy=y;}
+function _grHlineTo(x2,y2){_ctx2d.strokeStyle=_HI_PAL[_grHiColor];_ctx2d.lineWidth=1;
+  _ctx2d.beginPath();_ctx2d.moveTo(_grCx*2,_grCy*2);_ctx2d.lineTo(x2*2,y2*2);_ctx2d.stroke();_grCx=x2;_grCy=y2;}
+function _grDrawShape(idx,cx,cy,xorMode,scale,rot){
+  var base=(_mem[232]||0)+(_mem[233]||0)*256;
+  if(base===0)base=768;
+  var offLo=_mem[base+idx*2-1]||0,offHi=_mem[base+idx*2]||0;
+  var saddr=(offLo+offHi>0)?base+offLo+offHi*256:base+idx*10;
+  var x=cx,y=cy,s=Math.max(1,scale);
+  for(var i=0;i<128;i++){
+    var b=_mem[saddr+i]||0; if(b===0)break;
+    var d1=b&7,plot1=(b&64)!==0;
+    x+=_SHAPE_DX[d1]*s;y+=_SHAPE_DY[d1]*s;
+    if(plot1){var col=xorMode?"#000000":_HI_PAL[_grHiColor];_ctx2d.fillStyle=col;_ctx2d.fillRect(Math.trunc(x)*2,Math.trunc(y)*2,2,2);}
+    var d2=(b>>3)&7;
+    if(d2!==0){var plot2=(b&32)!==0;x+=_SHAPE_DX[d2]*s;y+=_SHAPE_DY[d2]*s;
+      if(plot2){var col2=xorMode?"#000000":_HI_PAL[_grHiColor];_ctx2d.fillStyle=col2;_ctx2d.fillRect(Math.trunc(x)*2,Math.trunc(y)*2,2,2);}}
+    if((b&128)!==0)break;
+  }
+}
+var _gwCx=0,_gwCy=0;
+var _GW_COLORS=["#000000","#0000AA","#00AA00","#00AAAA","#AA0000","#AA00AA","#AA5500","#AAAAAA","#555555","#5555FF","#55FF55","#55FFFF","#FF5555","#FF55FF","#FFFF55","#FFFFFF"];
+function _gwLine(x1,y1,x2,y2,color,filled){
+  if(_grMode===null){_grInit("hi");}
+  var col=color!==null?_GW_COLORS[Math.trunc(color)%16]:"#FFFFFF";
+  if(filled){
+    _ctx2d.fillStyle=col;
+    _ctx2d.fillRect(Math.min(x1,x2)*2,Math.min(y1,y2)*2,Math.abs(x2-x1)*2,Math.abs(y2-y1)*2);
+  }else{
+    _ctx2d.strokeStyle=col;_ctx2d.lineWidth=1;
+    _ctx2d.beginPath();_ctx2d.moveTo(x1*2,y1*2);_ctx2d.lineTo(x2*2,y2*2);_ctx2d.stroke();
+  }
+  _gwCx=Math.trunc(x2);_gwCy=Math.trunc(y2);
+}
+function _gwPset(x,y,color){_gwLine(x,y,x,y,color,false);_gwCx=Math.trunc(x);_gwCy=Math.trunc(y);}
+function _locate(row,col){
+  if(row!==null&&col!==null){
+    // Pad terminal text to reach row/col approximately
+    var lines=_termText.split("
+");
+    while(lines.length<row)lines.push("");
+    var line=lines[row-1]||"";
+    while(line.length<col-1)line+=" ";
+    lines[row-1]=line;
+    _termText=lines.join("
+");
+  }
+  _renderTerm();
+}
+async function _runProgram(){
+  _line=0;_ret=[];_running=true;_status.textContent="RUNNING...";
+  _dp=0;
+  _inkeyCached="";
+  try{
+    while(_running){
+      await new Promise(function(r){setTimeout(r,0);});
+      if(_trace)_print("["+_line+"]");
+      switch(_line){
+        case 0:
+          {var _oi=Math.trunc(error)-1;
+            if(_oi===0){_line=4;continue;}
+          }
+          break;
+        case 1:
+          // AKALABETH, PORT TO GWBASIC BY NANOCHESS, JAN/28/2019 TO FEB/03/2019
+          _line=4;
+          break;
+        case 4:
+          _home();
+          // KEY OFF
+          _line=7;
+          break;
+        case 7:
+          // CLEAR
+          _ret.push(_line); _line=60000; continue;
+          break;
+        case 8:
+          // RANDOMIZE (JS Math.random not seedable without library)
+          _line=9;
+          break;
+        case 9:
+          level = 0;
+          _line=10;
+          break;
+        case 10:
+          _grInit("lo"); // SCREEN 1
+          _grText(); // SCREEN 0
+          _locate(12,null);
+          _print(String(" welcome to akalabeth, world of doom!"));
+          _line=20;
+          break;
+        case 20:
+          _i_dn=Array.from({length:11},()=>new Array(11).fill(0));
+          _i_te=Array.from({length:21},()=>new Array(21).fill(0));
+          _i_xx=new Array(11).fill(0);
+          _i_yy=new Array(11).fill(0);
+          _i_pe=Array.from({length:11},()=>new Array(4).fill(0));
+          _i_ld=Array.from({length:11},()=>new Array(6).fill(0));
+          _i_cd=Array.from({length:11},()=>new Array(4).fill(0));
+          _i_ft=Array.from({length:11},()=>new Array(6).fill(0));
+          _i_la=Array.from({length:11},()=>new Array(4).fill(0));
+          _line=30;
+          break;
+        case 30:
+          x = 0; _for_end_x = 20; _for_step_x = 1;
+          _i_te(x,0) = 1;
+          _i_te(0,x) = 1;
+          _i_te(x,20) = 1;
+          _i_te(20,x) = 1;
+          // NEXT
+          _line=35;
+          break;
+        case 35:
+          _locate(23,null);
+          _printNoNL(String("  (please wait)"));
+          _line=40;
+          break;
+        case 40:
+          x = 1; _for_end_x = 19; _for_step_x = 1;
+          y = 1; _for_end_y = 19; _for_step_y = 1;
+          _i_te(x,y) = Math.trunc(rnd**5*4.5);
+          _line=41;
+          break;
+        case 41:
+          if(_i_te(x,y)===3 && rnd>.5){
+            _i_te(x,y) = 0;
+          }
+          break;
+        case 42:
+          // NEXT
+          _printNoNL(String("."));
+          // NEXT
+          _line=50;
+          break;
+        case 50:
+          _i_te(Math.trunc(rnd*19+1),Math.trunc(rnd*19+1)) = 5;
+          tx = Math.trunc(rnd*19+1);
+          ty = Math.trunc(rnd*19+1);
+          _i_te(tx,ty) = 3;
+          _line=51;
+          break;
+        case 51:
+          _i_xx(0) = 139;
+          _i_yy(0) = 79;
+          _line=52;
+          break;
+        case 52:
+          x = 2; _for_end_x = 20; _for_step_x = 2;
+          _i_xx(x/2) = Math.trunc(Math.atan(1/x)/Math.atan(1)*140+.5);
+          _i_yy(x/2) = Math.trunc(_i_xx(x/2)*4/7);
+          _line=53;
+          break;
+        case 53:
+          _i_pe(x/2,0) = 139-_i_xx(x/2);
+          _i_pe(x/2,1) = 139+_i_xx(x/2);
+          _i_pe(x/2,2) = 79-_i_yy(x/2);
+          _i_pe(x/2,3) = 79+_i_yy(x/2);
+          // NEXT
+          _line=54;
+          break;
+        case 54:
+          _i_pe(0,0) = 0;
+          _i_pe(0,1) = 279;
+          _i_pe(0,2) = 0;
+          _i_pe(0,3) = 159;
+          _line=55;
+          break;
+        case 55:
+          x = 1; _for_end_x = 10; _for_step_x = 1;
+          _i_cd(x,0) = 139-_i_xx(x)/3;
+          _i_cd(x,1) = 139+_i_xx(x)/3;
+          _i_cd(x,2) = 79-_i_yy(x)*.7;
+          _i_cd(x,3) = 79+_i_yy(x);
+          // NEXT
+          _printNoNL(String("."));
+          _line=56;
+          break;
+        case 56:
+          x = 0; _for_end_x = 9; _for_step_x = 1;
+          _i_ld(x,0) = (_i_pe(x,0)*2+_i_pe(x+1,0))/3;
+          _i_ld(x,1) = (_i_pe(x,0)+2*_i_pe(x+1,0))/3;
+          w = _i_ld(x,0)-_i_pe(x,0);
+          _line=57;
+          break;
+        case 57:
+          _i_ld(x,2) = _i_pe(x,2)+w*4/7;
+          _i_ld(x,3) = _i_pe(x,2)+2*w*4/7;
+          _i_ld(x,4) = (_i_pe(x,3)*2+_i_pe(x+1,3))/3;
+          _i_ld(x,5) = (_i_pe(x,3)+2*_i_pe(x+1,3))/3;
+          _line=58;
+          break;
+        case 58:
+          _i_ld(x,2) = _i_ld(x,4)-(_i_ld(x,4)-_i_ld(x,2))*.8;
+          _i_ld(x,3) = _i_ld(x,5)-(_i_ld(x,5)-_i_ld(x,3))*.8;
+          if(_i_ld(x,3)===_i_ld(x,4)){
+            _i_ld(x,3) = _i_ld(x,3)-1;
+          }
+          break;
+        case 59:
+          // NEXT
+          _line=60;
+          break;
+        case 60:
+          x = 0; _for_end_x = 9; _for_step_x = 1;
+          _i_ft(x,0) = 139-_i_xx(x)/3;
+          _i_ft(x,1) = 139+_i_xx(x)/3;
+          _i_ft(x,2) = 139-_i_xx(x+1)/3;
+          _i_ft(x,3) = 139+_i_xx(x+1)/3;
+          _line=61;
+          break;
+        case 61:
+          _i_ft(x,4) = 79+(_i_yy(x)*2+_i_yy(x+1))/3;
+          _i_ft(x,5) = 79+(_i_yy(x)+2*_i_yy(x+1))/3;
+          // NEXT
+          _line=62;
+          break;
+        case 62:
+          x = 0; _for_end_x = 9; _for_step_x = 1;
+          _i_la(x,0) = (_i_ft(x,0)*2+_i_ft(x,1))/3;
+          _i_la(x,1) = (_i_ft(x,0)+2*_i_ft(x,1))/3;
+          _i_la(x,3) = _i_ft(x,4);
+          _i_la(x,2) = 159-_i_la(x,3);
+          // NEXT
+          _line=68;
+          break;
+        case 68:
+          // COLOR 3 (text color, approximated)
+          _line=70;
+          break;
+        case 70:
+          _ret.push(_line); _line=100; continue;
+          _line=1000; continue;
+          break;
+        case 90:
+          x = 0; _for_end_x = 9; _for_step_x = 1;
+          y = 0; _for_end_y = 5; _for_step_y = 1;
+          _printNoNL(String(_i_ld(x,y))+String(" "));
+          // NEXT
+          _print("");
+          // NEXT
+          _s_q = await _input("? ");
+          _line=100;
+          break;
+        case 100:
+          _ret.push(_line); _line=60900; continue;
+          y = -1; _for_end_y = 1; _for_step_y = 1;
+          x = -1; _for_end_x = 1; _for_step_x = 1;
+          _line=105;
+          break;
+        case 105:
+          _gwLine(138,75,142,75,null,false);
+          _gwLine(140,73,140,77,null,false);
+          _line=110;
+          break;
+        case 110:
+          zz = _i_te(tx+x,ty+y);
+          x1 = 65+(x+1)*50;
+          y1 = (y+1)*50;
+          _line=120;
+          break;
+        case 120:
+          if(zz===2){
+            _gwLine(x1+20,y1+20,x1+30,y1+20,null,false);
+            _gwLine(_gwCx,_gwCy,x1+30,y1+30,null,false);
+            _gwLine(_gwCx,_gwCy,x1+20,y1+30,null,false);
+            _gwLine(_gwCx,_gwCy,x1+20,y1+20,null,false);
+          }
+          break;
+        case 130:
+          if(zz===3){
+            _gwLine(x1+10,y1+10,x1+20,y1+10,null,false);
+            _gwLine(_gwCx,_gwCy,x1+20,y1+40,null,false);
+            _gwLine(_gwCx,_gwCy,x1+10,y1+40,null,false);
+            _gwLine(_gwCx,_gwCy,x1+10,y1+30,null,false);
+            _gwLine(_gwCx,_gwCy,x1+40,y1+30,null,false);
+          }
+          break;
+        case 135:
+          if(zz===3){
+            _gwLine(_gwCx,_gwCy,x1+40,y1+40,null,false);
+            _gwLine(_gwCx,_gwCy,x1+30,y1+40,null,false);
+            _gwLine(_gwCx,_gwCy,x1+30,y1+10,null,false);
+            _gwLine(_gwCx,_gwCy,x1+40,y1+10,null,false);
+            _gwLine(_gwCx,_gwCy,x1+40,y1+20,null,false);
+            _gwLine(_gwCx,_gwCy,x1+10,y1+20,null,false);
+            _gwLine(_gwCx,_gwCy,x1+10,y1+10,null,false);
+          }
+          break;
+        case 140:
+          if(zz===4){
+            _gwLine(x1+20,y1+20,x1+30,y1+30,null,false);
+            _gwLine(_gwCx,_gwCy,x1+20,y1+30,null,false);
+            _gwLine(_gwCx,_gwCy,x1+30,y1+20,null,false);
+          }
+          break;
+        case 150:
+          if(zz===5){
+            _gwLine(x1,y1,x1+50,y1,null,false);
+            _gwLine(_gwCx,_gwCy,x1+50,y1+50,null,false);
+            _gwLine(_gwCx,_gwCy,x1,y1+50,null,false);
+            _gwLine(_gwCx,_gwCy,x1,y1,null,false);
+            _gwLine(x1+10,y1+10,x1+10,y1+40,null,false);
+          }
+          break;
+        case 155:
+          if(zz===5){
+            _gwLine(_gwCx,_gwCy,x1+40,y1+40,null,false);
+            _gwLine(_gwCx,_gwCy,x1+40,y1+10,null,false);
+            _gwLine(_gwCx,_gwCy,x1+10,y1+10,null,false);
+            _gwLine(_gwCx,_gwCy,x1+40,y1+40,null,false);
+            _gwLine(x1+10,y1+40,x1+40,y1+10,null,false);
+          }
+          break;
+        case 160:
+          if(zz===1){
+            _gwLine(x1+10,y1+50,x1+10,y1+40,null,false);
+            _gwLine(_gwCx,_gwCy,x1+20,y1+30,null,false);
+            _gwLine(_gwCx,_gwCy,x1+40,y1+30,null,false);
+            _gwLine(_gwCx,_gwCy,x1+40,y1+50,null,false);
+            _gwLine(x1,y1+10,x1+10,y1+10,null,false);
+            _gwLine(x1+50,y1+10,x1+40,y1+10,null,false);
+            _gwLine(x1,y1+40,x1+10,y1+40,null,false);
+            _gwLine(x1+40,y1+40,x1+50,y1+40,null,false);
+          }
+          break;
+        case 170:
+          if(zz===1){
+            _gwLine(x1+10,y1,x1+10,y1+20,null,false);
+            _gwLine(_gwCx,_gwCy,x1+20,y1+20,null,false);
+            _gwLine(_gwCx,_gwCy,x1+20,y1+30,null,false);
+            _gwLine(_gwCx,_gwCy,x1+30,y1+30,null,false);
+            _gwLine(_gwCx,_gwCy,x1+30,y1+10,null,false);
+            _gwLine(_gwCx,_gwCy,x1+40,y1+10,null,false);
+            _gwLine(_gwCx,_gwCy,x1+40,y1,null,false);
+          }
+          break;
+        case 190:
+          // NEXT
+          // NEXT
+          _line=_ret.pop(); continue;
+          break;
+        case 200:
+          _ret.push(_line); _line=60900; continue;
+          di = 0;
+          // COLOR 3 (text color, approximated)
+          _line=202;
+          break;
+        case 202:
+          ce = _i_dn(px+dx*di,py+dy*di);
+          le = _i_dn(px+dx*di+dy,py+dy*di-dx);
+          ri = _i_dn(px+dx*di-dy,py+dy*di+dx);
+          _line=204;
+          break;
+        case 204:
+          l1 = _i_pe(di,0);
+          r1 = _i_pe(di,1);
+          t1 = _i_pe(di,2);
+          b1 = _i_pe(di,3);
+          l2 = _i_pe(di+1,0);
+          r2 = _i_pe(di+1,1);
+          t2 = _i_pe(di+1,2);
+          b2 = _i_pe(di+1,3);
+          _line=205;
+          break;
+        case 205:
+          ce = Math.trunc(ce);
+          le = Math.trunc(le);
+          ri = Math.trunc(ri);
+          _line=206;
+          break;
+        case 206:
+          mc = Math.trunc(ce/10);
+          ce = ce-mc*10;
+          le = Math.trunc((le/10-Math.trunc(le/10))*10+.1);
+          ri = Math.trunc((ri/10-Math.trunc(ri/10))*10+.1);
+          _line=208;
+          break;
+        case 208:
+          if(di===0){
+            _line=216; continue;
+          }
+          break;
+        case 210:
+          if(ce===1 || ce===3 || ce===4){
+            _gwLine(l1,t1,r1,t1,null,false);
+            _gwLine(_gwCx,_gwCy,r1,b1,null,false);
+            _gwLine(_gwCx,_gwCy,l1,b1,null,false);
+            _gwLine(_gwCx,_gwCy,l1,t1,null,false);
+          }
+          break;
+        case 212:
+          if(ce===1 || ce===3){
+            en = 1;
+            _line=260; continue;
+          }
+          break;
+        case 214:
+          if(ce===4){
+            _gwLine(_i_cd(di,0),_i_cd(di,3),_i_cd(di,0),_i_cd(di,2),null,false);
+            _gwLine(_gwCx,_gwCy,_i_cd(di,1),_i_cd(di,2),null,false);
+            _gwLine(_gwCx,_gwCy,_i_cd(di,1),_i_cd(di,3),null,false);
+            en = 1;
+            _line=260; continue;
+          }
+          break;
+        case 216:
+          if(le===1 || le===3 || le===4){
+            _gwLine(l1,t1,l2,t2,null,false);
+            _gwLine(l1,b1,l2,b2,null,false);
+          }
+          break;
+        case 218:
+          if(ri===1 || ri===3 || ri===4){
+            _gwLine(r1,t1,r2,t2,null,false);
+            _gwLine(r1,b1,r2,b2,null,false);
+          }
+          break;
+        case 220:
+          if(le===4 && di>0){
+            _gwLine(_i_ld(di,0),_i_ld(di,4),_i_ld(di,0),_i_ld(di,2),null,false);
+            _gwLine(_gwCx,_gwCy,_i_ld(di,1),_i_ld(di,3),null,false);
+            _gwLine(_gwCx,_gwCy,_i_ld(di,1),_i_ld(di,5),null,false);
+          }
+          break;
+        case 222:
+          if(le===4 && di===0){
+            _gwLine(0,_i_ld(di,2)-3,_i_ld(di,1),_i_ld(di,3),null,false);
+            _gwLine(_gwCx,_gwCy,_i_ld(di,1),_i_ld(di,5),null,false);
+          }
+          break;
+        case 224:
+          if(ri===4 && di>0){
+            _gwLine(279-_i_ld(di,0),_i_ld(di,4),279-_i_ld(di,0),_i_ld(di,2),null,false);
+            _gwLine(_gwCx,_gwCy,279-_i_ld(di,1),_i_ld(di,3),null,false);
+            _gwLine(_gwCx,_gwCy,279-_i_ld(di,1),_i_ld(di,5),null,false);
+          }
+          break;
+        case 226:
+          if(ri===4 && di===0){
+            _gwLine(279,_i_ld(di,2)-3,279-_i_ld(di,1),_i_ld(di,3),null,false);
+            _gwLine(_gwCx,_gwCy,279-_i_ld(di,1),_i_ld(di,5),null,false);
+          }
+          break;
+        case 228:
+          if(le===3 || le===1 || le===4){
+            _line=234; continue;
+          }
+          break;
+        case 230:
+          if(di!==0){
+            _gwLine(l1,t1,l1,b1,null,false);
+          }
+          break;
+        case 232:
+          _gwLine(l1,t2,l2,t2,null,false);
+          _gwLine(_gwCx,_gwCy,l2,b2,null,false);
+          _gwLine(_gwCx,_gwCy,l1,b2,null,false);
+          _line=234;
+          break;
+        case 234:
+          if(ri===3 || ri===1 || ri===4){
+            _line=240; continue;
+          }
+          break;
+        case 236:
+          if(di!==0){
+            _gwLine(r1,t1,r1,b1,null,false);
+          }
+          break;
+        case 238:
+          _gwLine(r1,t2,r2,t2,null,false);
+          _gwLine(_gwCx,_gwCy,r2,b2,null,false);
+          _gwLine(_gwCx,_gwCy,r1,b2,null,false);
+          _line=240;
+          break;
+        case 240:
+          if(ce===7 || ce===9){
+            _gwLine(_i_ft(di,0),_i_ft(di,4),_i_ft(di,2),_i_ft(di,5),null,false);
+            _gwLine(_gwCx,_gwCy,_i_ft(di,3),_i_ft(di,5),null,false);
+            _gwLine(_gwCx,_gwCy,_i_ft(di,1),_i_ft(di,4),null,false);
+            _gwLine(_gwCx,_gwCy,_i_ft(di,0),_i_ft(di,4),null,false);
+          }
+          break;
+        case 242:
+          if(ce===8){
+            _gwLine(_i_ft(di,0),158-_i_ft(di,4),_i_ft(di,2),158-_i_ft(di,5),null,false);
+            _gwLine(_gwCx,_gwCy,_i_ft(di,3),158-_i_ft(di,5),null,false);
+            _gwLine(_gwCx,_gwCy,_i_ft(di,1),158-_i_ft(di,4),null,false);
+            _gwLine(_gwCx,_gwCy,_i_ft(di,0),158-_i_ft(di,4),null,false);
+          }
+          break;
+        case 244:
+          if(ce===7 || ce===8){
+            ba = _i_la(di,3);
+            tp = _i_la(di,2);
+            lx = _i_la(di,0);
+            rx = _i_la(di,1);
+            _gwLine(lx,ba,lx,tp,null,false);
+            _gwLine(rx,tp,rx,ba,null,false);
+          }
+          break;
+        case 246:
+          if(ce===7 || ce===8){
+            y1 = (ba*4+tp)/5;
+            y2 = (ba*3+tp*2)/5;
+            y3 = (ba*2+tp*3)/5;
+            y4 = (ba+tp*4)/5;
+            _gwLine(lx,y1,rx,y1,null,false);
+            _gwLine(lx,y2,rx,y2,null,false);
+            _gwLine(lx,y3,rx,y3,null,false);
+            _gwLine(lx,y4,rx,y4,null,false);
+          }
+          break;
+        case 248:
+          if(di>0 && ce===5){
+            _gwLine(139-10/di,_i_pe(di,3),139-10/di,_i_pe(di,3)-10/di,null,false);
+            _gwLine(_gwCx,_gwCy,139+10/di,_i_pe(di,3)-10/di,null,false);
+            _gwLine(_gwCx,_gwCy,139+10/di,_i_pe(di,3),null,false);
+            _gwLine(_gwCx,_gwCy,139-10/di,_i_pe(di,3),null,false);
+          }
+          break;
+        case 249:
+          if(ce===5 && di>0){
+            // COLOR 1 (text color, approximated)
+            _print(String("chest!"));
+            // COLOR 3 (text color, approximated)
+          }
+          break;
+        case 250:
+          if(di>0 && ce===5){
+            _gwLine(139-10/di,_i_pe(di,3)-10/di,139-5/di,_i_pe(di,3)-15/di,null,false);
+            _gwLine(_gwCx,_gwCy,139+15/di,_i_pe(di,3)-15/di,null,false);
+            _gwLine(_gwCx,_gwCy,139+15/di,_i_pe(di,3)-5/di,null,false);
+            _gwLine(_gwCx,_gwCy,139+10/di,_i_pe(di,3),null,false);
+          }
+          break;
+        case 252:
+          if(di>0 && ce===5){
+            _gwLine(139+10/di,_i_pe(di,3)-10/di,139+15/di,_i_pe(di,3)-15/di,null,false);
+          }
+          break;
+        case 260:
+          if(mc<1){
+            _line=490; continue;
+          }
+          break;
+        case 265:
+          b = 79+_i_yy(di);
+          c = 139;
+          _line=266;
+          break;
+        case 266:
+          // COLOR 1 (text color, approximated)
+          if(mc===8){
+            _printNoNL(String("chest!"));
+            _ret.push(_line); _line=60868; continue;
+            _print("");
+            // COLOR 3 (text color, approximated)
+            _line=269; continue;
+          }
+          break;
+        case 267:
+          _printNoNL(String(_s_m(mc)));
+          _ret.push(_line); _line=60868; continue;
+          _print("");
+          // COLOR 3 (text color, approximated)
+          _line=269;
+          break;
+        case 269:
+          if(di===0){
+            _line=490; continue;
+          }
+          break;
+        case 270:
+          {var _oi=Math.trunc(mc)-1;
+            if(_oi===0){_line=300;continue;}
+            else if(_oi===1){_line=310;continue;}
+            else if(_oi===2){_line=320;continue;}
+            else if(_oi===3){_line=330;continue;}
+            else if(_oi===4){_line=340;continue;}
+            else if(_oi===5){_line=350;continue;}
+            else if(_oi===6){_line=360;continue;}
+            else if(_oi===7){_line=370;continue;}
+            else if(_oi===8){_line=380;continue;}
+            else if(_oi===9){_line=390;continue;}
+          }
+          break;
+        case 280:
+          _line=490; continue;
+          break;
+        case 300:
+          _gwLine(c-23/di,b,c-15/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b-15/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-8/di,b-30/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+8/di,b-30/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-15/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+23/di,b,null,false);
+          _line=301;
+          break;
+        case 301:
+          _gwLine(c,b-26/di,c,b-65/di,null,false);
+          _gwLine(c-2/di+.5,b-38/di,c+2/di+.5,b-38/di,null,false);
+          _gwLine(c-3/di+.5,b-45/di,c+3/di+.5,b-45/di,null,false);
+          _gwLine(c-5/di+.5,b-53/di,c+5/di+.5,b-53/di,null,false);
+          _line=302;
+          break;
+        case 302:
+          _gwLine(c-23/di,b-56/di,c-30/di,b-53/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-23/di,b-45/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-23/di,b-53/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-8/di,b-38/di,null,false);
+          _line=303;
+          break;
+        case 303:
+          _gwLine(c-15/di,b-45/di,c-8/di,b-60/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+8/di,b-60/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-45/di,null,false);
+          _gwLine(c+15/di,b-42/di,c+15/di,b-57/di,null,false);
+          _gwLine(c+12/di,b-45/di,c+20/di,b-45/di,null,false);
+          _line=304;
+          break;
+        case 304:
+          _gwLine(c,b-75/di,c-5/di+.5,b-80/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-8/di,b-75/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-5/di+.5,b-65/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+5/di+.5,b-65/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+5/di+.5,b-68/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-5/di+.5,b-68/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-5/di+.5,b-65/di,null,false);
+          _line=305;
+          break;
+        case 305:
+          _gwLine(_gwCx,_gwCy,c+5/di+.5,b-65/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+8/di,b-75/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+5/di+.5,b-80/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-5/di+.5,b-80/di,null,false);
+          _gwPset(c-5/di+.5,b-72/di,null);
+          _gwPset(c+5/di+.5,b-72/di,null);
+          _line=309;
+          break;
+        case 309:
+          _line=490; continue;
+          break;
+        case 310:
+          _gwLine(c,b-56/di,c,b-8/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+30/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+30/di,b-45/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-64/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-56/di,null,false);
+          _line=311;
+          break;
+        case 311:
+          _gwLine(_gwCx,_gwCy,c-10/di,b-64/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-30/di,b-45/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-30/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c-10/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-8/di,null,false);
+          _line=312;
+          break;
+        case 312:
+          _gwLine(c-10/di,b-64/di,c-10/di,b-75/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-83/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-75/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-79/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-10/di,b-75/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-60/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-75/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-64/di,null,false);
+          _line=319;
+          break;
+        case 319:
+          _line=490; continue;
+          break;
+        case 320:
+          _gwLine(c+5/di,b-30/di,c,b-25/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-5/di,b-30/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b-5/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-10/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-5/di,null,false);
+          _line=321;
+          break;
+        case 321:
+          _gwLine(_gwCx,_gwCy,c+20/di,b-5/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-5/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+5/di,b-30/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-40/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+3/di+.5,b-35/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-3/di+.5,b-35/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-10/di,b-40/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-5/di,b-30/di,null,false);
+          _line=322;
+          break;
+        case 322:
+          _gwLine(c-5/di,b-33/di,c-3/di+.5,b-30/di,null,false);
+          _gwLine(c+5/di,b-33/di,c+3/di+.5,b-30/di,null,false);
+          _gwLine(c-5/di,b-20/di,c-5/di,b-15/di,null,false);
+          _line=323;
+          break;
+        case 323:
+          _gwLine(c+5/di,b-20/di,c+5/di,b-15/di,null,false);
+          _gwLine(c-7+di,b-20/di,c-7/di,b-15/di,null,false);
+          _gwLine(c+7/di,b-20/di,c+7/di,b-15/di,null,false);
+          _line=329;
+          break;
+        case 329:
+          _line=490; continue;
+          break;
+        case 330:
+          _gwLine(c,b,c-15/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c-8/di,b-8/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-8/di,b-15/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b-23/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b-15/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-23/di,b-23/di,null,false);
+          _line=331;
+          break;
+        case 331:
+          _gwLine(_gwCx,_gwCy,c-23/di,b-45/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b-53/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-8/di,b-53/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b-68/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-8/di,b-75/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-75/di,null,false);
+          _line=332;
+          break;
+        case 332:
+          _gwLine(c,b,c+15/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+8/di,b-8/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+8/di,b-15/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-23/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-15/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+23/di,b-23/di,null,false);
+          _line=333;
+          break;
+        case 333:
+          _gwLine(_gwCx,_gwCy,c+23/di,b-45/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-53/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+8/di,b-53/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-68/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+8/di,b-75/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-75/di,null,false);
+          _line=334;
+          break;
+        case 334:
+          _gwLine(c-15/di,b-68/di,c+15/di,b-68/di,null,false);
+          _gwLine(c-8/di,b-53/di,c+8/di,b-53/di,null,false);
+          _gwLine(c-23/di,b-15/di,c+8/di,b-45/di,null,false);
+          _line=335;
+          break;
+        case 335:
+          _gwLine(c-8/di,b-68/di,c,b-60/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+8/di,b-68/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+8/di,b-60/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-8/di,b-60/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-8/di,b-68/di,null,false);
+          _line=336;
+          break;
+        case 336:
+          _gwLine(c,b-38/di,c-8/di,b-38/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+8/di,b-53/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+8/di,b-45/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-45/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-30/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-38/di,null,false);
+          _line=339;
+          break;
+        case 339:
+          _line=490; continue;
+          break;
+        case 340:
+          _gwLine(c-10/di,b-15/di,c-10/di,b-30/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b-20/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b-15/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-15/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b-15/di,null,false);
+          _line=341;
+          break;
+        case 341:
+          _gwLine(c-15/di,b-10/di,c+15/di,b-10/di,null,false);
+          _gwLine(c-15/di,b-5/di,c+15/di,b-5/di,null,false);
+          _line=342;
+          break;
+        case 342:
+          _gwLine(c,b-15/di,c-5/di,b-20/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-5/di,b-35/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+5/di,b-35/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+5/di,b-20/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-15/di,null,false);
+          _line=343;
+          break;
+        case 343:
+          _gwLine(c-5/di,b-20/di,c+5/di,b-20/di,null,false);
+          _gwLine(c-5/di,b-25/di,c+5/di,b-25/di,null,false);
+          _gwLine(c-5/di,b-30/di,c+5/di,b-30/di,null,false);
+          _line=344;
+          break;
+        case 344:
+          _gwLine(c-10/di,b-35/di,c-10/di,b-40/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-5/di,b-45/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+5/di,b-45/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-40/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-35/di,null,false);
+          _line=345;
+          break;
+        case 345:
+          _gwLine(c-10/di,b-40/di,c,b-45/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-40/di,null,false);
+          _line=346;
+          break;
+        case 346:
+          _gwLine(c-5/di,b-40/di,c+5/di,b-40/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-30/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-40/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b-30/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-5/di+.5,b-40/di,null,false);
+          _line=349;
+          break;
+        case 349:
+          _line=490; continue;
+          break;
+        case 350:
+          _gwLine(c-20/di,79-_i_yy(di),c-20/di,b-88/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-10/di,b-83/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-83/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+20/di,b-88/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+20/di,79-_i_yy(di),null,false);
+          _gwLine(_gwCx,_gwCy,c-20/di,79-_i_yy(di),null,false);
+          _line=351;
+          break;
+        case 351:
+          _gwLine(c-20/di,b-88/di,c-30/di,b-83/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-30/di,b-78/di,null,false);
+          _gwLine(c+20/di,b-88/di,c+30/di,b-83/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+40/di,b-83/di,null,false);
+          _line=352;
+          break;
+        case 352:
+          _gwLine(c-15/di,b-86/di,c-20/di,b-83/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-20/di,b-78/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-30/di,b-73/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-30/di,b-68/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-20/di,b-63/di,null,false);
+          _line=353;
+          break;
+        case 353:
+          _gwLine(c-10/di,b-83/di,c-10/di,b-58/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-50/di,null,false);
+          _gwLine(c+10/di,b-83/di,c+10/di,b-78/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+20/di,b-73/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+20/di,b-40/di,null,false);
+          _line=354;
+          break;
+        case 354:
+          _gwLine(c+15/di,b-85/di,c+20/di,b-78/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+30/di,b-76/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+30/di,b-60/di,null,false);
+          _line=355;
+          break;
+        case 355:
+          _gwLine(c,b-83/di,c,b-73/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-68/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-63/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-58/di,null,false);
+          _line=359;
+          break;
+        case 359:
+          _line=490; continue;
+          break;
+        case 360:
+          _gwLine(c+5/di+.5,b-10/di,c-5/di+.5,b-10/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-15/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-20/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+5/di+.5,b-15/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+5/di+.5,b-10/di,null,false);
+          _line=361;
+          break;
+        case 361:
+          _gwLine(_gwCx,_gwCy,c+7/di+.5,b-6/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+5/di+.5,b-3/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-5/di+.5,b-3/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-7/di+.5,b-6/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-5/di+.5,b-10/di,null,false);
+          _line=362;
+          break;
+        case 362:
+          _gwLine(c+2/di+.5,b-3/di,c+5/di+.5,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+8/di,b,null,false);
+          _gwLine(c-2/di+.5,b-3/di,c-5/di+.5,b,null,false);
+          _gwLine(_gwCx,_gwCy,c-8/di,b,null,false);
+          _gwPset(c+3/di+.5,b-8/di,null);
+          _gwPset(c-3/di+.5,b-8/di,null);
+          _gwLine(c+3/di+.5,b-5/di,c-3/di+.5,b-5/di,null,false);
+          _line=363;
+          break;
+        case 363:
+          _line=490; continue;
+          break;
+        case 370:
+          _gwLine(139-10/di,_i_pe(di,3),139-10/di,_i_pe(di,3)-10/di,null,false);
+          _gwLine(_gwCx,_gwCy,139+10/di,_i_pe(di,3)-10/di,null,false);
+          _gwLine(_gwCx,_gwCy,139+10/di,_i_pe(di,3),null,false);
+          _gwLine(_gwCx,_gwCy,139-10/di,_i_pe(di,3),null,false);
+          _line=371;
+          break;
+        case 371:
+          _gwLine(139-10/di,_i_pe(di,3)-10/di,139-5/di,_i_pe(di,3)-15/di,null,false);
+          _gwLine(_gwCx,_gwCy,139+15/di,_i_pe(di,3)-15/di,null,false);
+          _gwLine(_gwCx,_gwCy,139+15/di,_i_pe(di,3)-5/di,null,false);
+          _gwLine(_gwCx,_gwCy,139+10/di,_i_pe(di,3),null,false);
+          _line=372;
+          break;
+        case 372:
+          _gwLine(139+10/di,_i_pe(di,3)-10/di,139+15/di,_i_pe(di,3)-15/di,null,false);
+          _line=373;
+          break;
+        case 373:
+          _line=490; continue;
+          break;
+        case 380:
+          _gwLine(c-14/di,b-46/di,c-12/di,b-37/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-20/di,b-32/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-30/di,b-32/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-22/di,b-24/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-40/di,b-17/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-40/di,b-7/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-38/di,b-5/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-40/di,b-3/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-40/di,b,null,false);
+          _line=381;
+          break;
+        case 381:
+          _gwLine(_gwCx,_gwCy,c-36/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c-34/di,b-2/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-32/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c-28/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c-28/di,b-3/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-30/di,b-5/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-28/di,b-7/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-28/di,b-15/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-27/di,null,false);
+          _line=382;
+          break;
+        case 382:
+          _gwLine(c+14/di,b-46/di,c+12/di,b-37/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+20/di,b-32/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+30/di,b-32/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+22/di,b-24/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+40/di,b-17/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+40/di,b-7/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+38/di,b-5/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+40/di,b-3/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+40/di,b,null,false);
+          _line=383;
+          break;
+        case 383:
+          _gwLine(_gwCx,_gwCy,c+36/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+34/di,b-2/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+32/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+28/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+28/di,b-3/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+30/di,b-5/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+28/di,b-7/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+28/di,b-15/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-27/di,null,false);
+          _line=384;
+          break;
+        case 384:
+          _gwLine(c+6/di,b-48/di,c+38/di,b-41/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+40/di,b-42/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+18/di,b-56/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+12/di,b-56/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-57/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+8/di,b-56/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-8/di,b-56/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-10/di,b-58/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+14/di,b-58/di,null,false);
+          _line=385;
+          break;
+        case 385:
+          _gwLine(_gwCx,_gwCy,c+16/di,b-59/di,null,false);
+          _line=386;
+          break;
+        case 386:
+          _gwLine(_gwCx,_gwCy,c+8/di,b-63/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+6/di,b-63/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+2/di+.5,b-70/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+2/di+.5,b-63/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-2/di+.5,b-63/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-2/di+.5,b-70/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-6/di,b-63/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-8/di,b-63/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-16/di,b-59/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-14/di,b-58/di,null,false);
+          _line=387;
+          break;
+        case 387:
+          _gwLine(_gwCx,_gwCy,c-10/di,b-57/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-12/di,b-56/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-18/di,b-56/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-36/di,b-47/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-36/di,b-39/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-28/di,b-41/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-28/di,b-46/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-20/di,b-50/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-18/di,b-50/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-14/di,b-46/di,null,false);
+          _line=388;
+          break;
+        case 388:
+          _line=3087; continue;
+          break;
+        case 390:
+          _gwLine(c+6/di,b-60/di,c+30/di,b-90/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+60/di,b-30/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+60/di,b-10/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+30/di,b-40/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-40/di,null,false);
+          _line=391;
+          break;
+        case 391:
+          _gwLine(c-6/di,b-60/di,c-30/di,b-90/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-60/di,b-30/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-60/di,b-10/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-30/di,b-40/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b-40/di,null,false);
+          _line=392;
+          break;
+        case 392:
+          _gwLine(c,b-25/di,c+6/di,b-25/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-20/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+12/di,b-10/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-6/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+14/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-5/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+16/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+20/di,b,null,false);
+          _line=393;
+          break;
+        case 393:
+          _gwLine(_gwCx,_gwCy,c+20/di,b-6/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+18/di,b-10/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+18/di,b-20/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-30/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+15/di,b-45/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+40/di,b-60/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+40/di,b-70/di,null,false);
+          _line=394;
+          break;
+        case 394:
+          _gwLine(_gwCx,_gwCy,c+10/di,b-55/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+6/di,b-60/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b-74/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+6/di,b-80/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+4/di+.5,b-80/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+3/di+.5,b-82/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+2/di+.5,b-80/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-80/di,null,false);
+          _line=395;
+          break;
+        case 395:
+          _gwLine(c,b-25/di,c-6/di,b-25/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-10/di,b-20/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-12/di,b-10/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-10/di,b-6/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-10/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c-14/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b-5/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-16/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c-20/di,b,null,false);
+          _line=396;
+          break;
+        case 396:
+          _gwLine(_gwCx,_gwCy,c-20/di,b-6/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-18/di,b-10/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-18/di,b-20/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b-30/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-15/di,b-45/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-40/di,b-60/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-40/di,b-70/di,null,false);
+          _line=397;
+          break;
+        case 397:
+          _gwLine(_gwCx,_gwCy,c-10/di,b-55/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-6/di,b-60/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-10/di,b-74/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-6/di,b-80/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-4/di+.5,b-80/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-3/di+.5,b-82/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-2/di+.5,b-80/di,null,false);
+          _gwLine(_gwCx,_gwCy,c,b-80/di,null,false);
+          _line=398;
+          break;
+        case 398:
+          _gwLine(c-6/di,b-25/di,c,b-6/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+10/di,b,null,false);
+          _gwLine(_gwCx,_gwCy,c+4/di+.5,b-8/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+6/di,b-25/di,null,false);
+          _gwLine(c-40/di,b-64/di,c-40/di,b-90/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-52/di,b-80/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-52/di,b-40/di,null,false);
+          _line=399;
+          break;
+        case 399:
+          _gwLine(c+40/di,b-86/di,c+38/di,b-92/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+42/di,b-92/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+40/di,b-86/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+40/di,b-50/di,null,false);
+          _line=400;
+          break;
+        case 400:
+          _gwLine(c+4/di+.5,b-70/di,c+6/di,b-74/di,null,false);
+          _gwLine(c-4/di+.5,b-70/di,c-6/di,b-74/di,null,false);
+          _gwLine(c,b-64/di,c,b-60/di,null,false);
+          _line=490; continue;
+          break;
+        case 490:
+          if(en===1){
+            en = 0;
+            _line=_ret.pop(); continue;
+          }
+          break;
+        case 491:
+          di = di+1;
+          _line=202; continue;
+          break;
+        case 500:
+          // RANDOMIZE (JS Math.random not seedable without library)
+          _line=501;
+          break;
+        case 501:
+          x = 1; _for_end_x = 9; _for_step_x = 1;
+          y = 1; _for_end_y = 9; _for_step_y = 1;
+          _i_dn(x,y) = 0;
+          // NEXT
+          // NEXT
+          _line=510;
+          break;
+        case 510:
+          x = 0; _for_end_x = 10; _for_step_x = 1;
+          _i_dn(x,0) = 1;
+          _i_dn(x,10) = 1;
+          _i_dn(0,x) = 1;
+          _i_dn(10,x) = 1;
+          // NEXT
+          _line=520;
+          break;
+        case 520:
+          x = 2; _for_end_x = 8; _for_step_x = 2;
+          y = 1; _for_end_y = 9; _for_step_y = 1;
+          _i_dn(x,y) = 1;
+          _i_dn(y,x) = 1;
+          // NEXT
+          // NEXT
+          _line=530;
+          break;
+        case 530:
+          x = 2; _for_end_x = 8; _for_step_x = 2;
+          y = 1; _for_end_y = 9; _for_step_y = 2;
+          _line=540;
+          break;
+        case 540:
+          if(rnd>.95){
+            _i_dn(x,y) = 2;
+          }
+          break;
+        case 541:
+          if(rnd>.95){
+            _i_dn(y,x) = 2;
+          }
+          break;
+        case 542:
+          if(rnd>.6){
+            _i_dn(y,x) = 3;
+          }
+          break;
+        case 543:
+          if(rnd>.6){
+            _i_dn(x,y) = 3;
+          }
+          break;
+        case 544:
+          if(rnd>.6){
+            _i_dn(x,y) = 4;
+          }
+          break;
+        case 545:
+          if(rnd>.6){
+            _i_dn(y,x) = 4;
+          }
+          break;
+        case 546:
+          if(rnd>.97){
+            _i_dn(y,x) = 9;
+          }
+          break;
+        case 547:
+          if(rnd>.97){
+            _i_dn(x,y) = 9;
+          }
+          break;
+        case 548:
+          if(rnd>.94){
+            _i_dn(x,y) = 5;
+          }
+          break;
+        case 549:
+          if(rnd>.94){
+            _i_dn(y,x) = 5;
+          }
+          break;
+        case 568:
+          // NEXT
+          // NEXT
+          _line=569;
+          break;
+        case 569:
+          _i_dn(2,1) = 0;
+          if(in/2===Math.trunc(in/2)){
+            _i_dn(7,3) = 7;
+            _i_dn(3,7) = 8;
+          }
+          break;
+        case 570:
+          if(in/2!==Math.trunc(in/2)){
+            _i_dn(7,3) = 8;
+            _i_dn(3,7) = 7;
+          }
+          break;
+        case 580:
+          if(in===1){
+            _i_dn(1,1) = 8;
+            _i_dn(7,3) = 0;
+          }
+          break;
+        case 585:
+          _ret.push(_line); _line=2000; continue;
+          break;
+        case 590:
+          _line=_ret.pop(); continue;
+          break;
+        case 1000:
+          _ret.push(_line); _line=60890; continue;
+          _gwLine(0,160,231,199,0,true);
+          _locate(21,1);
+          _printNoNL(String("command? "));
+          _ret.push(_line); _line=60868; continue;
+          break;
+        case 1001:
+          _s_x = _s_inkey;
+          if(_s_x===""){
+            _line=1001; continue;
+          }
+          break;
+        case 1003:
+          x = _asc(_s_x);
+          _line=1004;
+          break;
+        case 1004:
+          if(_len(_s_x)>1){
+            x2 = _asc(_midS(_s_x,2));
+          }else{
+            x2 = 0;
+          }
+          break;
+        case 1030:
+          if(x2===72){
+            {var _oi=Math.trunc(_sgn(in)+1)-1;
+              if(_oi===0){_line=1100;continue;}
+              else if(_oi===1){_line=1150;continue;}
+            }
+          }
+          break;
+        case 1040:
+          if(x2===77){
+            {var _oi=Math.trunc(_sgn(in)+1)-1;
+              if(_oi===0){_line=1200;continue;}
+              else if(_oi===1){_line=1250;continue;}
+            }
+          }
+          break;
+        case 1050:
+          if(x2===75){
+            {var _oi=Math.trunc(_sgn(in)+1)-1;
+              if(_oi===0){_line=1300;continue;}
+              else if(_oi===1){_line=1350;continue;}
+            }
+          }
+          break;
+        case 1060:
+          if(x2===80){
+            {var _oi=Math.trunc(_sgn(in)+1)-1;
+              if(_oi===0){_line=1400;continue;}
+              else if(_oi===1){_line=1450;continue;}
+            }
+          }
+          break;
+        case 1070:
+          if(x===13){
+            {var _oi=Math.trunc(_sgn(in)+1)-1;
+              if(_oi===0){_line=1500;continue;}
+              else if(_oi===1){_line=1550;continue;}
+            }
+          }
+          break;
+        case 1080:
+          if(x===65){
+            {var _oi=Math.trunc(_sgn(in)+1)-1;
+              if(_oi===0){_line=1600;continue;}
+              else if(_oi===1){_line=1650;continue;}
+            }
+          }
+          break;
+        case 1081:
+          if(x===32){
+            _print(String("pass"));
+            _line=1090; continue;
+          }
+          break;
+        case 1085:
+          if(x===83 || x===115){
+            _line=1700; continue;
+          }
+          break;
+        case 1086:
+          if(x===80 || x===112){
+            if(pa===1){
+              pa = 0;
+              _print(String("pause off"));
+              _line=1000; continue;
+            }
+          }
+          break;
+        case 1087:
+          if(x===80 || x===112){
+            if(pa===0){
+              pa = 1;
+              _print(String("pause on"));
+              _line=1000; continue;
+            }
+          }
+          break;
+        case 1089:
+          _print(String("huh?"));
+          _line=1000; continue;
+          break;
+        case 1090:
+          pw(0) = pw(0)-1+_sgn(in)*.9;
+          if(pw(0)<0){
+            c(0) = 0;
+            _print("");
+            _print(String("you have starved!!!!!"));
+            _line=1093; continue;
+          }
+          break;
+        case 1091:
+          _locate(22,30);
+          _printNoNL(String("food=")+String(_midS(String(Math.trunc(pw(0)*10+0.5)/10),2)));
+          _ret.push(_line); _line=60868; continue;
+          _locate(23,30);
+          _printNoNL(String("h.p.=")+String(c(0)));
+          _ret.push(_line); _line=60868; continue;
+          _locate(24,30);
+          _printNoNL(String("gold=")+String(c(5)));
+          _ret.push(_line); _line=60868; continue;
+          _locate(20,1);
+          _line=1092;
+          break;
+        case 1092:
+          pw(0) = Math.trunc(pw(0)*10)/10;
+          _line=1093;
+          break;
+        case 1093:
+          if(c(0)<=0){
+            _line=6000; continue;
+          }
+          break;
+        case 1095:
+          if(in>0){
+            _ret.push(_line); _line=60890; continue;
+            _gwLine(0,160,231,199,0,true);
+            _ret.push(_line); _line=4000; continue;
+            if(c(0)<=0){
+              _line=1093; continue;
+            }
+          }
+          break;
+        case 1096:
+          _locate(22,30);
+          _printNoNL(String("food=")+String(_midS(String(Math.trunc(pw(0)*10+0.5)/10),2)));
+          _ret.push(_line); _line=60868; continue;
+          _locate(23,30);
+          _printNoNL(String("h.p.=")+String(c(0)));
+          _ret.push(_line); _line=60868; continue;
+          _locate(24,30);
+          _printNoNL(String("gold=")+String(c(5)));
+          _ret.push(_line); _line=60868; continue;
+          _locate(20,1);
+          _line=1097;
+          break;
+        case 1097:
+          if(in===0){
+            _ret.push(_line); _line=100; continue;
+            _line=1000; continue;
+          }
+          break;
+        case 1098:
+          if(in>0){
+            _ret.push(_line); _line=200; continue;
+            _line=1000; continue;
+          }
+          break;
+        case 1100:
+          _print(String("north"));
+          if(_i_te(tx,ty-1)===1){
+            _print(String("you can't pass the mountains"));
+            _line=1090; continue;
+          }
+          break;
+        case 1110:
+          ty = ty-1;
+          _line=1090; continue;
+          break;
+        case 1150:
+          if(_i_dn(px+dx,py+dy)!==1 && _i_dn(px+dx,py+dy)<10){
+            px = px+dx;
+            py = py+dy;
+          }
+          break;
+        case 1155:
+          _print(String("forward"));
+          _line=1160;
+          break;
+        case 1160:
+          if(_i_dn(px,py)===2){
+            _print(String("aaarrrggghhh!!! a trap!"));
+            c(0) = c(0)-Math.trunc(rnd*in+3);
+            mr = 1;
+            in = in+1;
+            _print(String("falling to level ")+String(in));
+            _ret.push(_line); _line=500; continue;
+            _ret.push(_line); _line=60890; continue;
+            _gwLine(0,160,231,199,0,true);
+            _line=1090; continue;
+          }
+          break;
+        case 1165:
+          z = 0;
+          _line=1170;
+          break;
+        case 1170:
+          if(_i_dn(px,py)===5){
+            _i_dn(px,py) = 0;
+            _print(String("gold!!!!!"));
+            z = Math.trunc(rnd*5*in+in);
+            _print(String(z)+String("-pieces of eight"));
+            c(5) = c(5)+z;
+          }
+          break;
+        case 1175:
+          if(z>0){
+            z = Math.trunc(rnd*6);
+            _print(String("&& a ")+String(_s_w(z)));
+            pw(z) = pw(z)+1;
+            _line=1090; continue;
+          }
+          break;
+        case 1190:
+          _line=1090; continue;
+          break;
+        case 1200:
+          _print(String("east"));
+          if(_i_te(tx+1,ty)===1){
+            _print(String("you can't pass the mountains"));
+            _line=1090; continue;
+          }
+          break;
+        case 1210:
+          tx = tx+1;
+          _line=1090; continue;
+          break;
+        case 1250:
+          _print(String("turn right"));
+          _line=1255;
+          break;
+        case 1255:
+          if(dx!==0){
+            dy = dx;
+            dx = 0;
+            _line=1090; continue;
+          }
+          break;
+        case 1260:
+          dx = -dy;
+          dy = 0;
+          _line=1090; continue;
+          break;
+        case 1300:
+          _print(String("west"));
+          if(_i_te(tx-1,ty)===1){
+            _print(String("you can't pass the mountains"));
+            _line=1090; continue;
+          }
+          break;
+        case 1310:
+          tx = tx-1;
+          _line=1090; continue;
+          break;
+        case 1350:
+          _print(String("turn left"));
+          _line=1355;
+          break;
+        case 1355:
+          if(dx!==0){
+            dy = -dx;
+            dx = 0;
+            _line=1090; continue;
+          }
+          break;
+        case 1360:
+          dx = dy;
+          dy = 0;
+          _line=1090; continue;
+          break;
+        case 1400:
+          _print(String("south"));
+          if(_i_te(tx,ty+1)===1){
+            _print(String("you can't pass the mountains"));
+            _line=1090; continue;
+          }
+          break;
+        case 1410:
+          ty = ty+1;
+          _line=1090; continue;
+          break;
+        case 1450:
+          _print(String("turn around"));
+          dx = -dx;
+          dy = -dy;
+          _line=1090; continue;
+          break;
+        case 1500:
+          if(_i_te(tx,ty)===3){
+            _ret.push(_line); _line=60080; continue;
+            _ret.push(_line); _line=60200; continue;
+            _grInit("lo"); // SCREEN 1
+            _line=1090; continue;
+          }
+          break;
+        case 1510:
+          if(_i_te(tx,ty)===4 && in===0){
+            _print(String("go dungeon"));
+            _print(String("please wait "));
+            in = 1;
+            _ret.push(_line); _line=500; continue;
+            dx = 1;
+            dy = 0;
+            px = 1;
+            py = 1;
+            _line=1090; continue;
+          }
+          break;
+        case 1515:
+          if(_i_te(tx,ty)===5){
+            _line=7000; continue;
+          }
+          break;
+        case 1520:
+          _print(String("huh?"));
+          _line=1000; continue;
+          break;
+        case 1550:
+          if(_i_dn(px,py)!==7 && _i_dn(px,py)!==9){
+            _line=1580; continue;
+          }
+          break;
+        case 1555:
+          _print(String("go down to level ")+String(in+1));
+          _line=1560;
+          break;
+        case 1560:
+          in = in+1;
+          _ret.push(_line); _line=500; continue;
+          mr = 1;
+          _line=1090; continue;
+          break;
+        case 1580:
+          if(_i_dn(px,py)!==8){
+            _print(String("huh?"));
+            _line=1090; continue;
+          }
+          break;
+        case 1581:
+          if(in===1){
+            _print(String("leave dungeon"));
+            in = 0;
+            _line=1586; continue;
+          }
+          break;
+        case 1584:
+          _print(String("go up to level ")+String(in-1));
+          _line=1585;
+          break;
+        case 1585:
+          in = in-1;
+          _ret.push(_line); _line=500; continue;
+          mr = 1;
+          _line=1586;
+          break;
+        case 1586:
+          if(in===0){
+            _print(String("thou hast gained"));
+            _print(String(lk)+String(" hit points"));
+            c(0) = c(0)+lk;
+            lk = 0;
+          }
+          break;
+        case 1587:
+          _line=1090; continue;
+          break;
+        case 1600:
+          _line=1090; continue;
+          break;
+        case 1650:
+          mn = 0;
+          da = 0;
+          _print(String("attack"));
+          _printNoNL(String("which weapon "));
+          _s_q = await _gwInput(1);
+          _line=1651;
+          break;
+        case 1651:
+          if(_s_q==="r"){
+            da = 10;
+            _print(String("rapier"));
+            if(pw(1)<1){
+              _print(String("! owned"));
+              _line=1650; continue;
+            }
+          }
+          break;
+        case 1652:
+          if(_s_q==="a"){
+            da = 5;
+            _print(String("axe"));
+            if(pw(2)<1){
+              _print(String("! owned"));
+              _line=1650; continue;
+            }
+          }
+          break;
+        case 1653:
+          if(_s_q==="s"){
+            da = 1;
+            _print(String("shield"));
+            if(pw(3)<1){
+              _print(String("! owned"));
+              _line=1650; continue;
+            }
+          }
+          break;
+        case 1654:
+          if(_s_q==="b"){
+            da = 4;
+            _print(String("bow"));
+            if(pw(4)<1){
+              _print(String("! owned"));
+              _line=1650; continue;
+            }
+          }
+          break;
+        case 1655:
+          if(_s_q==="m"){
+            _print(String("magic amulet"));
+            _line=1680; continue;
+          }
+          break;
+        case 1656:
+          if(_s_q==="b" && _s_pt==="m"){
+            _print(String("mages can't use bows!"));
+            _line=1650; continue;
+          }
+          break;
+        case 1657:
+          if(_s_q==="r" && _s_pt==="m"){
+            _print(String("mages can't use rapiers!"));
+            _line=1650; continue;
+          }
+          break;
+        case 1659:
+          if(da===0){
+            _print(String("hands"));
+          }
+          break;
+        case 1660:
+          if(da===5 || da===4){
+            _line=1670; continue;
+          }
+          break;
+        case 1661:
+          mn = _i_dn(px+dx,py+dy)/10;
+          mn = Math.trunc(mn);
+          _line=1662;
+          break;
+        case 1662:
+          if(mn<1 || c(2)-rnd*25<mn+in){
+            _print(String("you missed"));
+            _line=1668; continue;
+          }
+          break;
+        case 1663:
+          _print(String("hit!!! "));
+          da = (rnd*da+c(1)/5);
+          _i_mz(mn,1) = _i_mz(mn,1)-da;
+          _line=1664;
+          break;
+        case 1664:
+          _print(String(_s_m(mn))+String("'s hit points=")+String(_i_mz(mn,1)));
+          _line=1665;
+          break;
+        case 1665:
+          if(_i_mz(mn,1)<1){
+            _print(String("thou hast killed a ")+String(_s_m(mn)));
+            _print(String("thou shalt receive"));
+            da = Math.trunc(mn+in);
+            _print(String(da)+String(" pieces of eight"));
+          }
+          break;
+        case 1666:
+          if(_i_mz(mn,1)<1){
+            c(5) = Math.trunc(c(5)+da);
+            _i_dn(_i_ml(mn,0),_i_ml(mn,1)) = _i_dn(_i_ml(mn,0),_i_ml(mn,1))-10*mn;
+            _i_mz(mn,0) = 0;
+          }
+          break;
+        case 1667:
+          lk = lk+Math.trunc(mn*in/2);
+          if(mn===ta){
+            ta = -ta;
+          }
+          break;
+        case 1668:
+          if(pa===1){
+            _printNoNL(String("-cr- to cont. "));
+            _s_q = await _gwInput(1);
+          }else{
+            _ret.push(_line); _line=60890; continue;
+          }
+          break;
+        case 1669:
+          _gwLine(0,160,231,199,0,true);
+          _line=1090; continue;
+          break;
+        case 1670:
+          if(da===5){
+            _printNoNL(String("to throw || swing:"));
+            _s_q = await _gwInput(1);
+            if(_s_q!=="t"){
+              _print(String("swing"));
+              _line=1661; continue;
+            }
+          }
+          break;
+        case 1671:
+          if(da===5){
+            _print(String("throw"));
+            pw(2) = pw(2)-1;
+          }
+          break;
+        case 1672:
+          y = 1; _for_end_y = 5; _for_step_y = 1;
+          if(px+dx*y<1 || px+dx*y>9 || py+dy*y>9 || py+dy*y<0){
+            _line=1662; continue;
+          }
+          break;
+        case 1673:
+          mn = _i_dn(px+dx*y,py+dy*y);
+          mn = Math.trunc(mn/10);
+          if(mn>0){
+            _line=1662; continue;
+          }
+          break;
+        case 1674:
+          // NEXT
+          _line=1662; continue;
+          break;
+        case 1680:
+          if(pw(5)<1){
+            _print(String("none owned"));
+            _line=1650; continue;
+          }
+          break;
+        case 1681:
+          if(_s_pt==="f"){
+            q = Math.trunc(rnd*4+1);
+            _line=1685; continue;
+          }
+          break;
+        case 1682:
+          _print(String("1-ladder-up")+String("2-ladder-dn"));
+          _print(String("3-kill")+String("4-bad??"));
+          _printNoNL(String("choice "));
+          _s_q = await _gwInput(1);
+          q = parseFloat(_s_q);
+          _print(String(q));
+          if(q<1 || q>4){
+            _line=1682; continue;
+          }
+          break;
+        case 1683:
+          if(rnd>.75){
+            _print(String("last charge on this amulet!"));
+            pw(5) = pw(5)-1;
+          }
+          break;
+        case 1685:
+          {var _oi=Math.trunc(q)-1;
+            if(_oi===0){_line=1686;continue;}
+            else if(_oi===1){_line=1690;continue;}
+            else if(_oi===2){_line=1691;continue;}
+            else if(_oi===3){_line=1692;continue;}
+          }
+          break;
+        case 1686:
+          _print(String("ladder up"));
+          _i_dn(px,py) = 8;
+          _line=1090; continue;
+          break;
+        case 1690:
+          _print(String("ladder down"));
+          _i_dn(px,py) = 7;
+          _line=1090; continue;
+          break;
+        case 1691:
+          _print(String("magic attack"));
+          da = 10+in;
+          _line=1672; continue;
+          break;
+        case 1692:
+          {var _oi=Math.trunc(Math.trunc(rnd*3+1))-1;
+            if(_oi===0){_line=1693;continue;}
+            else if(_oi===1){_line=1695;continue;}
+            else if(_oi===2){_line=1697;continue;}
+          }
+          break;
+        case 1693:
+          _print(String("you have been turned"));
+          _print(String("into a toad!"));
+          _line=1694;
+          break;
+        case 1694:
+          z2 = 1; _for_end_z2 = 4; _for_step_z2 = 1;
+          c(z2) = 3;
+          // NEXT
+          _line=1090; continue;
+          break;
+        case 1695:
+          _print(String("you have been turned"));
+          _print(String("into a lizard man"));
+          y = 0; _for_end_y = 4; _for_step_y = 1;
+          c(y) = Math.trunc(c(y)*2.5);
+          // NEXT
+          _line=1090; continue;
+          break;
+        case 1697:
+          _print(String("backfire"));
+          c(0) = c(0)/2;
+          _line=1090; continue;
+          break;
+        case 1700:
+          _ret.push(_line); _line=60080; continue;
+          _printNoNL(String("press enter to continue"));
+          _s_q = await _gwInput(1);
+          _grText(); // SCREEN 0
+          _grInit("lo"); // SCREEN 1
+          _home();
+          _line=1090; continue;
+          break;
+        case 2000:
+          nm = 0;
+          x = 1; _for_end_x = 10; _for_step_x = 1;
+          _line=2005;
+          break;
+        case 2005:
+          _i_mz(x,0) = 0;
+          _i_mz(x,1) = x+3+in;
+          _line=2010;
+          break;
+        case 2010:
+          if(x-2>in || rnd>.4){
+            _line=2090; continue;
+          }
+          break;
+        case 2020:
+          _i_ml(x,0) = Math.trunc(rnd*9+1);
+          _i_ml(x,1) = Math.trunc(rnd*9+1);
+          _line=2030;
+          break;
+        case 2030:
+          if(_i_dn(_i_ml(x,0),_i_ml(x,1))!==0){
+            _line=2020; continue;
+          }
+          break;
+        case 2040:
+          if(_i_ml(x,0)===px && _i_ml(x,1)===py){
+            _line=2020; continue;
+          }
+          break;
+        case 2050:
+          _i_dn(_i_ml(x,0),_i_ml(x,1)) = x*10;
+          _line=2051;
+          break;
+        case 2051:
+          _i_mz(x,0) = 1;
+          _line=2052;
+          break;
+        case 2052:
+          nm = nm+1;
+          _line=2055;
+          break;
+        case 2055:
+          _i_mz(x,1) = x*2+in*2*lp;
+          _line=2090;
+          break;
+        case 2090:
+          // NEXT
+          _line=_ret.pop(); continue;
+          break;
+        case 3087:
+          _gwLine(c-28/di,b-41/di,c+30/di,b-55/di,null,false);
+          _gwLine(c+28/di,b-58/di,c+22/di,b-56/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+22/di,b-53/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+28/di,b-52/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+34/di,b-54/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+20/di,b-50/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+26/di,b-47/di,null,false);
+          _line=3088;
+          break;
+        case 3088:
+          _gwLine(c+10/di,b-58/di,c+10/di,b-61/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+4/di,b-58/di,null,false);
+          _gwLine(c-10/di,b-58/di,c-10/di,b-61/di,null,false);
+          _gwLine(_gwCx,_gwCy,c-4/di,b-58/di,null,false);
+          _gwLine(c+40/di,b-9/di,c+50/di,b-12/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+40/di,b-7/di,null,false);
+          _line=3089;
+          break;
+        case 3089:
+          _gwLine(c-8/di,b-25/di,c+6/di,b-7/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+28/di,b-7/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+28/di,b-9/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+20/di,b-9/di,null,false);
+          _gwLine(_gwCx,_gwCy,c+6/di,b-25/di,null,false);
+          _line=490; continue;
+          break;
+        case 4000:
+          mm = 1; _for_end_mm = 10; _for_step_mm = 1;
+          if(_i_mz(mm,0)===0){
+            _line=4999; continue;
+          }
+          break;
+        case 4010:
+          ra = Math.sqrt((px-_i_ml(mm,0))**2+(py-_i_ml(mm,1))**2);
+          _line=4011;
+          break;
+        case 4011:
+          if(_i_mz(mm,1)<in*lp){
+            _line=4030; continue;
+          }
+          break;
+        case 4020:
+          if(ra<1.3){
+            _line=4500; continue;
+          }
+          break;
+        case 4025:
+          if(mm===8 && ra<3){
+            _line=4999; continue;
+          }
+          break;
+        case 4030:
+          x1 = _sgn(px-_i_ml(mm,0));
+          y1 = _sgn(py-_i_ml(mm,1));
+          _line=4031;
+          break;
+        case 4031:
+          if(_i_mz(mm,1)<in*lp){
+            x1 = -x1;
+            y1 = -y1;
+          }
+          break;
+        case 4035:
+          if(y1===0){
+            _line=4045; continue;
+          }
+          break;
+        case 4040:
+          d = _i_dn(_i_ml(mm,0),_i_ml(mm,1)+y1);
+          if(d===1 || d>9 || d===2){
+            _line=4045; continue;
+          }
+          break;
+        case 4042:
+          x1 = 0;
+          _line=4050; continue;
+          break;
+        case 4045:
+          y1 = 0;
+          if(x1===0){
+            _line=4050; continue;
+          }
+          break;
+        case 4046:
+          d = _i_dn(_i_ml(mm,0)+x1,_i_ml(mm,1));
+          if(d===1 || d>9 || d===2){
+            x1 = 0;
+            _line=4081; continue;
+          }
+          break;
+        case 4050:
+          _i_dn(_i_ml(mm,0),_i_ml(mm,1)) = _i_dn(_i_ml(mm,0),_i_ml(mm,1))-10*mm;
+          _line=4055;
+          break;
+        case 4055:
+          if(_i_ml(mm,0)+x1===px && _i_ml(mm,1)+y1===py){
+            _line=4999; continue;
+          }
+          break;
+        case 4060:
+          _i_ml(mm,0) = _i_ml(mm,0)+x1;
+          _i_ml(mm,1) = _i_ml(mm,1)+y1;
+          _line=4080;
+          break;
+        case 4080:
+          _i_dn(_i_ml(mm,0),_i_ml(mm,1)) = _i_dn(_i_ml(mm,0),_i_ml(mm,1))+10*mm;
+          _line=4081;
+          break;
+        case 4081:
+          if(x1!==0 || y1!==0){
+            _line=4999; continue;
+          }
+          break;
+        case 4082:
+          if(_i_mz(mm,1)<in*lp && ra<1.3){
+            _line=4500; continue;
+          }
+          break;
+        case 4083:
+          if(_i_mz(mm,1)<in*lp){
+            _i_mz(mm,1) = _i_mz(mm,1)+mm+in;
+          }
+          break;
+        case 4499:
+          _line=4999; continue;
+          break;
+        case 4500:
+          if(mm===2 || mm===7){
+            _line=4600; continue;
+          }
+          break;
+        case 4509:
+          _locate(20,1);
+          _print(String("you are being attacked"));
+          _print(String("by a ")+String(_s_m(mm)));
+          _line=4510;
+          break;
+        case 4510:
+          if(rnd*20-_sgn(pw(3))-c(3)+mm+in<0){
+            _print(String("missed"));
+            _line=4525; continue;
+          }
+          break;
+        case 4520:
+          _print(String("hit"));
+          c(0) = c(0)-Math.trunc(rnd*mm+in);
+          _line=4525;
+          break;
+        case 4525:
+          if(pa===1){
+            _printNoNL(String("-cr- to cont. "));
+            _s_q = await _gwInput(1);
+          }else{
+            _ret.push(_line); _line=60890; continue;
+          }
+          break;
+        case 4530:
+          _line=4999; continue;
+          break;
+        case 4600:
+          if(rnd<.5){
+            _line=4509; continue;
+          }
+          break;
+        case 4610:
+          if(mm===7){
+            pw(0) = Math.trunc(pw(0)/2);
+            _print(String("a gremlin stole some food"));
+            _line=4525; continue;
+          }
+          break;
+        case 4620:
+          zz = Math.trunc(rnd*6);
+          if(pw(zz)<1){
+            _line=4620; continue;
+          }
+          break;
+        case 4630:
+          _print(String("a thief stole a ")+String(_s_w(zz)));
+          pw(zz) = pw(zz)-1;
+          _line=4525; continue;
+          break;
+        case 4999:
+          // NEXT
+          _line=_ret.pop(); continue;
+          break;
+        case 6000:
+          _print("");
+          _print("");
+          _print(String("        we mourn the passing of"));
+          _line=6005;
+          break;
+        case 6005:
+          if(_len(_s_pn)>22){
+            _s_pn = "";
+          }
+          break;
+        case 6010:
+          if(_s_pn===""){
+            _s_pn = "the peasant";
+          }
+          break;
+        case 6020:
+          _s_pn = _s_pn+" && his computer";
+          _line=6030;
+          break;
+        case 6030:
+          _locate(null,20-Math.trunc(_len(_s_pn)/2));
+          _print(String(_s_pn));
+          _line=6035;
+          break;
+        case 6035:
+          _print(String("  to invoke a miracle of resurrection"));
+          _line=6040;
+          break;
+        case 6040:
+          _printNoNL(String("            <hit esc key>"));
+          _line=6050;
+          break;
+        case 6050:
+          if(_s_inkey===_chrS(27)){
+            _line=1; continue;
+          }
+          break;
+        case 6060:
+          _line=6050; continue;
+          break;
+        case 7000:
+          _grText(); // SCREEN 0
+          _home();
+          _line=7010;
+          break;
+        case 7010:
+          if(_s_pn!==""){
+            _line=7500; continue;
+          }
+          break;
+        case 7020:
+          _print("");
+          _print("");
+          _print(String("     welcome peasant into the halls of"));
+          _print(String("the mighty lord british. herein thou maychoose to dare battle with the evil"));
+          _print(String("creatures of the depths, for great"));
+          _print(String("reward!"));
+          _line=7030;
+          break;
+        case 7030:
+          _print("");
+          _printNoNL(String("what is thy name peasant "));
+          _s_pn = await _input("? ");
+          _line=7040;
+          break;
+        case 7040:
+          _printNoNL(String("doest thou wish for grand adventure ? "));
+          _s_q = await _gwInput(1);
+          if(_s_q!=="y"){
+            _print("");
+            _print(String("then leave && begone!"));
+            _s_pn = "";
+            _print("");
+            _printNoNL(String("        press -space to cont."));
+            _s_q = await _gwInput(1);
+            _line=1090; continue;
+          }
+          break;
+        case 7045:
+          _print("");
+          _line=7050;
+          break;
+        case 7050:
+          _print("");
+          _print(String("good! thou shalt try to become a"));
+          _print(String("knight!!!"));
+          _print("");
+          _print(String("thy first task is to go into the"));
+          _print(String("dungeons && to return only after"));
+          _printNoNL(String("killing a(n) "));
+          ta = Math.trunc(c(4)/3);
+          _print(String(_s_m(ta)));
+          _line=7060;
+          break;
+        case 7060:
+          _print("");
+          _print(String("    go now upon this quest, && may"));
+          _print(String("lady luck be fair unto you....."));
+          _print(String(".....also i, british, have increased"));
+          _print(String("each of thy attributes by one!"));
+          _line=7070;
+          break;
+        case 7070:
+          _print("");
+          _printNoNL(String("         press -space- to cont."));
+          _s_q = await _gwInput(1);
+          x = 0; _for_end_x = 5; _for_step_x = 1;
+          c(x) = c(x)+1;
+          // NEXT
+          _home();
+          _line=1090; continue;
+          break;
+        case 7500:
+          if(ta>0){
+            _print("");
+            _print("");
+            _print(String(_s_pn)+String(" why hast thou returned?"));
+            _print(String("thou must kill a(n) ")+String(_s_m(ta)));
+            _print(String("go now && complete thy quest!"));
+            _print("");
+            _printNoNL(String("       press -space- to cont."));
+            _s_q = await _gwInput(1);
+            _home();
+            _line=1090; continue;
+          }
+          break;
+        case 7510:
+          _print("");
+          _print("");
+          _print("");
+          _print(String("aahh!!......")+String(_s_pn));
+          _print("");
+          _print(String("thou hast acomplished thy quest!"));
+          if(Math.abs(ta)===10){
+            _line=7900; continue;
+          }
+          break;
+        case 7520:
+          _print(String("unfortunately, this is ! enough to"));
+          _print(String("become a knight."));
+          ta = Math.abs(ta)+1;
+          _print("");
+          _print(String("now thou must kill a(n) ")+String(_s_m(ta)));
+          _line=7530;
+          break;
+        case 7530:
+          _line=7060; continue;
+          break;
+        case 7900:
+          _grText(); // SCREEN 0
+          _home();
+          _print("");
+          _print("");
+          _print("");
+          _s_pn = "lord "+_s_pn;
+          _print(String("           ")+String(_s_pn)+String(","));
+          _line=7910;
+          break;
+        case 7910:
+          _print(String("       thou hast proved thyself worthy"));
+          _print(String("of knighthood, continue play if thou"));
+          _print(String("doth wish, but thou hast acomplished"));
+          _print(String("the main objective of this game..."));
+          _line=7920;
+          break;
+        case 7920:
+          if(lp===10){
+            _line=7950; continue;
+          }
+          break;
+        case 7930:
+          _print("");
+          _print(String("   now maybe thou art foolhearty"));
+          _print(String("enough to try difficulty level ")+String(lp+1));
+          _line=7940;
+          break;
+        case 7940:
+          _line=7070; continue;
+          break;
+        case 7950:
+          _print("");
+          _print(String("...call california pacific computer"));
+          _print(String("at (415)-569-9126 to report this"));
+          _print(String("amazing feat!"));
+          _line=7990;
+          break;
+        case 7990:
+          _line=7070; continue;
+          break;
+        case 50000:
+          // TEST MONSTERS (BY NANOCHESS)
+          _line=50002;
+          break;
+        case 50002:
+          mc = 1;
+          _line=50003;
+          break;
+        case 50003:
+          _grInit("hi"); // SCREEN 2
+          _grText(); // SCREEN 0
+          _line=50004;
+          break;
+        case 50004:
+          _grInit("lo"); // SCREEN 1
+          _line=50005;
+          break;
+        case 50005:
+          c = 160;
+          b = 120;
+          di = 1;
+          _line=50010;
+          break;
+        case 50010:
+          en = 1;
+          _ret.push(_line); _line=270; continue;
+          break;
+        case 50020:
+          _s_a = await _gwInput(1);
+          _line=50025;
+          break;
+        case 50025:
+          mc = mc+1;
+          if(mc<11){
+            _line=50003; continue;
+          }
+          break;
+        case 50030:
+          _grInit("hi"); // SCREEN 2
+          _grText(); // SCREEN 0
+          _line=50040;
+          break;
+        case 50040:
+          _end(); return;
+          break;
+        case 60000:
+          _grInit("lo"); // SCREEN 1
+          _grText(); // SCREEN 0
+          _home();
+          _locate(5,null);
+          _s_q = await _input("TYPE THY LUCKY NUMBER....."+"? ");
+          ln = parseFloat(_s_q);
+          _line=60005;
+          break;
+        case 60005:
+          _locate(7,null);
+          _s_q = await _input("LEVEL OF PLAY(1-10)......"+"? ");
+          lp = Math.trunc(parseFloat(_s_q));
+          _line=60006;
+          break;
+        case 60006:
+          if(lp<1 || lp>10){
+            _line=60005; continue;
+          }
+          break;
+        case 60010:
+          // RANDOMIZE (JS Math.random not seedable without library)
+          _line=60020;
+          break;
+        case 60020:
+          // DATA "HIT POINTS.....","STRENGTH.......","DEXTERITY......","STAMINA........","WISDOM.........","GOLD..........."
+          _line=60025;
+          break;
+        case 60025:
+          pw=new Array(6).fill(0);
+          _line=60030;
+          break;
+        case 60030:
+          _s_c=new Array(6).fill(0);
+          x = 0; _for_end_x = 5; _for_step_x = 1;
+          _s_c(x) = parseFloat(_data[_dp++]);
+          // NEXT
+          _line=60040;
+          break;
+        case 60040:
+          c=new Array(6).fill(0);
+          _line=60041;
+          break;
+        case 60041:
+          _s_m=new Array(11).fill(0);
+          _i_ml=Array.from({length:11},()=>new Array(2).fill(0));
+          _i_mz=Array.from({length:11},()=>new Array(2).fill(0));
+          _line=60042;
+          break;
+        case 60042:
+          // DATA "SKELETON","THIEF","GIANT RAT","ORC","VIPER","CARRION CRAWLER","GREMLIN","MIMIC","DAEMON","BALROG"
+          _line=60043;
+          break;
+        case 60043:
+          x = 1; _for_end_x = 10; _for_step_x = 1;
+          _s_m(x) = parseFloat(_data[_dp++]);
+          // NEXT
+          _line=60050;
+          break;
+        case 60050:
+          x = 0; _for_end_x = 5; _for_step_x = 1;
+          c(x) = Math.trunc(Math.sqrt(rnd)*21+4);
+          // NEXT
+          _line=60060;
+          break;
+        case 60060:
+          _home();
+          _locate(8,null);
+          x = 0; _for_end_x = 5; _for_step_x = 1;
+          _print(String(_s_c(x))+String(c(x)));
+          // NEXT
+          _print("");
+          _print(String("shalt thou play with these qualities?"));
+          _locate(null,20);
+          _s_q = await _input("? ");
+          if(_s_q!=="y"){
+            _line=60050; continue;
+          }
+          break;
+        case 60061:
+          _locate(15,null);
+          _print("");
+          _print(String("&& shalt thou be a fighter || a mage?"));
+          _locate(null,20);
+          _s_pt = await _input("? ");
+          _line=60062;
+          break;
+        case 60062:
+          if(_s_pt==="m" || _s_pt==="f"){
+            _line=60070; continue;
+          }
+          break;
+        case 60063:
+          _line=60061; continue;
+          break;
+        case 60070:
+          _s_w=new Array(6).fill(0);
+          // DATA "FOOD","RAPIER","AXE","SHIELD","BOW AND ARROWS","MAGIC AMULET"
+          x = 0; _for_end_x = 5; _for_step_x = 1;
+          _s_w(x) = parseFloat(_data[_dp++]);
+          // NEXT
+          _line=60075;
+          break;
+        case 60075:
+          _ret.push(_line); _line=60080; continue;
+          _ret.push(_line); _line=60200; continue;
+          _line=_ret.pop(); continue;
+          break;
+        case 60080:
+          _grText(); // SCREEN 0
+          _home();
+          _print("");
+          _print("");
+          _print(String("     stat's              weapons"));
+          _print("");
+          x = 0; _for_end_x = 5; _for_step_x = 1;
+          _print(String(_s_c(x))+String(c(x))+String(_tab(24))+String("0-")+String(_s_w(x)));
+          // NEXT
+          _line=60081;
+          break;
+        case 60081:
+          _locate(11,18);
+          _print(String("q-quit"));
+          _line=60085;
+          break;
+        case 60085:
+          z = 0; _for_end_z = 5; _for_step_z = 1;
+          _locate(5+z,25-_len(String(pw(z))));
+          _print(String(pw(z)));
+          // NEXT
+          _line=60090;
+          break;
+        case 60090:
+          _locate(17,5);
+          _printNoNL(String("price"));
+          _locate(null,15);
+          _printNoNL(String("damage"));
+          _locate(null,25);
+          _print(String("item"));
+          _line=60100;
+          break;
+        case 60100:
+          x = 0; _for_end_x = 5; _for_step_x = 1;
+          _locate(19+x,25);
+          _printNoNL(String(_s_w(x)));
+          // NEXT
+          _line=60110;
+          break;
+        case 60110:
+          _locate(19,5);
+          _printNoNL(String("1 for 10"));
+          _locate(null,15);
+          _print(String("n/a"));
+          _locate(20,5);
+          _printNoNL(String("8"));
+          _locate(null,15);
+          _print(String("1-10"));
+          _locate(21,5);
+          _printNoNL(String("5"));
+          _locate(null,15);
+          _print(String("1-5"));
+          _line=60120;
+          break;
+        case 60120:
+          _locate(22,5);
+          _printNoNL(String("6"));
+          _locate(null,15);
+          _print(String("1"));
+          _locate(23,5);
+          _printNoNL(String("3"));
+          _locate(null,15);
+          _print(String("1-4"));
+          _locate(24,5);
+          _printNoNL(String("15"));
+          _locate(null,15);
+          _printNoNL(String("?????"));
+          _locate(1,1);
+          _line=60130;
+          break;
+        case 60130:
+          _line=_ret.pop(); continue;
+          break;
+        case 60200:
+          _locate(13,1);
+          _print(String("welcome to the adventure shop"));
+          _line=60210;
+          break;
+        case 60210:
+          _ret.push(_line); _line=60890; continue;
+          _locate(14,1);
+          _print(String((typeof (" ")==='number'?_chrS(" "):String(" ")[0]).repeat(Math.trunc(120))));
+          _locate(14,1);
+          _line=60211;
+          break;
+        case 60211:
+          _printNoNL(String("which item shalt thou buy "));
+          _s_q = await _gwInput(1);
+          if(_s_q==="q"){
+            _print("");
+            _print(String("bye"));
+            _ret.push(_line); _line=60890; continue;
+            _grText(); // SCREEN 0
+            _home();
+            _line=_ret.pop(); continue;
+          }
+          break;
+        case 60215:
+          z = -1;
+          _line=60220;
+          break;
+        case 60220:
+          if(_s_q==="f"){
+            _print(String("food"));
+            z = 0;
+            p = 1;
+          }
+          break;
+        case 60221:
+          if(_s_q==="r"){
+            _print(String("rapier"));
+            z = 1;
+            p = 8;
+          }
+          break;
+        case 60222:
+          if(_s_q==="a"){
+            _print(String("axe"));
+            z = 2;
+            p = 5;
+          }
+          break;
+        case 60223:
+          if(_s_q==="s"){
+            _print(String("shield"));
+            z = 3;
+            p = 6;
+          }
+          break;
+        case 60224:
+          if(_s_q==="b"){
+            _print(String("bow"));
+            z = 4;
+            p = 3;
+          }
+          break;
+        case 60225:
+          if(_s_q==="m"){
+            _print(String("amulet"));
+            z = 5;
+            p = 15;
+          }
+          break;
+        case 60226:
+          if(z===-1){
+            _print(String(_s_q));
+            _print(String("i'm sorry we don't have that."));
+            _line=60210; continue;
+          }
+          break;
+        case 60227:
+          if(_s_q==="r" && _s_pt==="m"){
+            _print(String("i'm sorry mages"));
+            _print(String("can't use that!"));
+            _line=60210; continue;
+          }
+          break;
+        case 60228:
+          if(_s_q==="b" && _s_pt==="m"){
+            _print(String("i'm sorry mages"));
+            _print(String("can't use that!"));
+            _line=60210; continue;
+          }
+          break;
+        case 60230:
+          if(c(5)-p<0){
+            _print(String("m'lord thou can ! afford that item."));
+            _line=60210; continue;
+          }
+          break;
+        case 60235:
+          if(z===0){
+            pw(z) = pw(z)+9;
+          }
+          break;
+        case 60236:
+          pw(z) = pw(z)+1;
+          c(5) = c(5)-p;
+          _line=60237;
+          break;
+        case 60237:
+          _locate(10,16);
+          _print(String(c(5))+String("  "));
+          _line=60240;
+          break;
+        case 60240:
+          _locate(5+z,25-_len(String(pw(z))));
+          _printNoNL(String(pw(z)));
+          _line=60250;
+          break;
+        case 60250:
+          _line=60210; continue;
+          break;
+        case 60868:
+          cy = 1;
+          cx = 0;
+          if(cx>=39){
+            _line=_ret.pop(); continue;
+          }else{
+            _printNoNL(String((typeof (" ")==='number'?_chrS(" "):String(" ")[0]).repeat(Math.trunc(39-cx))));
+            _locate(null,cx);
+            _line=_ret.pop(); continue;
+          }
+          break;
+        case 60890:
+          x = (Date.now()%86400000/1000);
+          _line=60891;
+          break;
+        case 60891:
+          if((Date.now()%86400000/1000)-x<0.5){
+            _line=60891; continue;
+          }
+          break;
+        case 60893:
+          _line=_ret.pop(); continue;
+          break;
+        case 60900:
+          _grInit("lo"); // SCREEN 1
+          _gwLine(0,0,319,159,0,true);
+          _line=_ret.pop(); continue;
+          break;
+        default:_running=false;break;
+      }
+    }
+  }catch(e){
+    
+    _print("?ERROR: "+e.message);_status.textContent="ERROR";
+  }
+  if(!_running)_status.textContent="READY";
+}
+function startProgram(){_home();_grText();_line=0;_runProgram();}
+</script>
+</body>
+</html>
